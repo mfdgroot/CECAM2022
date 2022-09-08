@@ -1,7 +1,65 @@
 import numpy as np
 import openfermion as of
 from openfermion.chem.molecular_data import spinorb_from_spatial
+from openfermionpyscf import run_pyscf
 from pyscf import gto
+from utility import obtain_PES, get_qubit_hamiltonian, taper_hamiltonian
+import tequila as tq
+
+def vqe_PES(molecule, xs, basis, samples=None, noise=None):
+    results = np.zeros_like(xs)
+    theta_value = 0.
+    for idx, x in enumerate(xs):
+        theta = tq.Variable("theta")
+        H = get_qubit_hamiltonian(mol=molecule, geometry=x, basis=basis, qubit_transf='jw')
+        H = taper_hamiltonian(H, n_spin_orbitals=4, n_electrons=2, qubit_transf='jw')
+        H = tq.hamiltonian.qubit_hamiltonian.QubitHamiltonian(H)
+        U = tq.gates.Ry(angle=theta, target=0)
+        E = tq.ExpectationValue(H=H, U=U)
+        result = tq.minimize(objective=E, method="BFGS", initial_values={'theta': theta_value}, tol=1e-6, samples=samples, backend='cirq', silent=True, noise=noise)
+        theta_value = result.angles['theta']
+        results[idx] = result.energy
+    return results
+
+def finite_difference_vqe_PES(x, delta, basis, molecule='h2', samples=None, noise=None):
+    forwardx = x + delta
+    backwardx = x - delta
+    forwardE =  vqe_PES(molecule, forwardx, basis, samples=samples, noise=noise)
+    backwardE =  vqe_PES(molecule, backwardx, basis, samples=samples, noise=noise)
+    return (forwardE-backwardE) / (2.*delta)
+
+def noisy_finite_difference_PES(x, delta, amplitude, basis, molecule='h2', method='fci'):
+    forwardx = x + delta
+    backwardx = x - delta
+    forwardE =  obtain_PES(molecule, forwardx, basis, method=method)
+    forwardE += amplitude*(1.-2.*np.random.rand(*forwardE.shape))
+    backwardE =  obtain_PES(molecule, backwardx, basis, method=method)
+    backwardE += amplitude*(1-2.*np.random.rand(*backwardE.shape))
+    return (forwardE-backwardE) / (2.*delta)
+
+def finite_difference_PES(x, delta, basis, molecule='h2', method='fci'):
+    forwardx = x + delta
+    backwardx = x - delta
+    forwardE =  obtain_PES(molecule, forwardx, basis, method=method)
+    backwardE =  obtain_PES(molecule, backwardx, basis, method=method)
+    return (forwardE-backwardE) / (2.*delta)
+
+def get_lih(positions, basis):
+    atom = [['Li', tuple(positions[0:3])], ['H', tuple(positions[3:6])]]
+    moldata = of.MolecularData(geometry=atom, basis=basis, charge=0, multiplicity=1)
+    moldata = run_pyscf(moldata)
+    return moldata
+
+def get_hf_fd(positions, d, basis, occupied=None, active=None):
+    f = []
+    for idx in range(len(positions)):
+        cd = positions.copy()
+        cd[idx] += d
+        hfwd = of.transforms.jordan_wigner(get_lih(cd, basis).get_molecular_hamiltonian(occupied_indices=occupied,active_indices=active))
+        cd[idx] -= 2*d
+        hbwd = of.transforms.jordan_wigner(get_lih(cd, basis).get_molecular_hamiltonian(occupied_indices=occupied,active_indices=active))
+        f.append((hfwd-hbwd)/(2*d))
+    return f
 
 def gradient_mo_operator(mol, mo_coeffs, hcore_mo, tei_mo, with_pulay=True):
     """
