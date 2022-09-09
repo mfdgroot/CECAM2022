@@ -5,6 +5,7 @@ from openfermionpyscf import run_pyscf
 from pyscf import gto
 from utility import obtain_PES, get_qubit_hamiltonian, taper_hamiltonian
 import tequila as tq
+import pyscf
 
 def vqe_PES(molecule, xs, basis, samples=None, noise=None):
     results = np.zeros_like(xs)
@@ -53,12 +54,23 @@ def get_lih(positions, basis):
 def get_hf_fd(positions, d, basis, occupied=None, active=None):
     f = []
     for idx in range(len(positions)):
-        cd = positions.copy()
-        cd[idx] += d
-        hfwd = of.transforms.jordan_wigner(get_lih(cd, basis).get_molecular_hamiltonian(occupied_indices=occupied,active_indices=active))
-        cd[idx] -= 2*d
-        hbwd = of.transforms.jordan_wigner(get_lih(cd, basis).get_molecular_hamiltonian(occupied_indices=occupied,active_indices=active))
-        f.append((hfwd-hbwd)/(2*d))
+        coords = positions.copy()
+        mol = pyscf.gto.Mole(atom=[['Li', tuple(coords[0:3])],['H', tuple(coords[3:6])]], basis=basis)
+        mol.build()
+        mf = mol.RHF().run()
+        coords[idx] += d
+        molfwd = pyscf.gto.Mole(atom=[['Li', tuple(coords[0:3])],['H', tuple(coords[3:6])]], basis=basis)
+        molfwd.build()
+        coords[idx] -= 2*d
+        molbwd = pyscf.gto.Mole(atom=[['Li', tuple(coords[0:3])],['H', tuple(coords[3:6])]], basis=basis)
+        molbwd.build()
+        tei = (molfwd.intor('int2e', aosym=1) - molbwd.intor('int2e', aosym=1))/(2*d)
+        oei = (molfwd.intor('int1e_nuc', aosym=1) + molfwd.intor('int1e_kin', aosym=1) - molbwd.intor('int1e_nuc', aosym=1) - molbwd.intor('int1e_kin', aosym=1))/(2*d)
+        cst = (molfwd.energy_nuc()-molbwd.energy_nuc())/(2*d)
+        mooei = of.general_basis_change(oei, mf.mo_coeff, key=(1, 0))
+        motei = of.general_basis_change(tei, mf.mo_coeff, key=(1, 0, 1, 0)).transpose(0, 2, 3, 1)
+        smooei, smotei = of.chem.molecular_data.spinorb_from_spatial(mooei, 0.5*motei)
+        f.append(of.transforms.jordan_wigner(of.InteractionOperator(cst, smooei, smotei)))
     return f
 
 def gradient_mo_operator(mol, mo_coeffs, hcore_mo, tei_mo, with_pulay=True):
